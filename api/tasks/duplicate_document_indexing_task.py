@@ -25,9 +25,11 @@ def duplicate_document_indexing_task(dataset_id: str, document_ids: list):
     documents = []
     start_at = time.perf_counter()
 
-    dataset = db.session.query(Dataset).filter(Dataset.id == dataset_id).first()
+    dataset = db.session.query(Dataset).where(Dataset.id == dataset_id).first()
     if dataset is None:
-        raise ValueError("Dataset not found")
+        logging.info(click.style(f"Dataset not found: {dataset_id}", fg="red"))
+        db.session.close()
+        return
 
     # check document limit
     features = FeatureService.get_features(dataset.tenant_id)
@@ -48,7 +50,7 @@ def duplicate_document_indexing_task(dataset_id: str, document_ids: list):
     except Exception as e:
         for document_id in document_ids:
             document = (
-                db.session.query(Document).filter(Document.id == document_id, Document.dataset_id == dataset_id).first()
+                db.session.query(Document).where(Document.id == document_id, Document.dataset_id == dataset_id).first()
             )
             if document:
                 document.indexing_status = "error"
@@ -57,12 +59,14 @@ def duplicate_document_indexing_task(dataset_id: str, document_ids: list):
                 db.session.add(document)
         db.session.commit()
         return
+    finally:
+        db.session.close()
 
     for document_id in document_ids:
-        logging.info(click.style("Start process document: {}".format(document_id), fg="green"))
+        logging.info(click.style(f"Start process document: {document_id}", fg="green"))
 
         document = (
-            db.session.query(Document).filter(Document.id == document_id, Document.dataset_id == dataset_id).first()
+            db.session.query(Document).where(Document.id == document_id, Document.dataset_id == dataset_id).first()
         )
 
         if document:
@@ -70,7 +74,7 @@ def duplicate_document_indexing_task(dataset_id: str, document_ids: list):
             index_type = document.doc_form
             index_processor = IndexProcessorFactory(index_type).init_index_processor()
 
-            segments = db.session.query(DocumentSegment).filter(DocumentSegment.document_id == document_id).all()
+            segments = db.session.query(DocumentSegment).where(DocumentSegment.document_id == document_id).all()
             if segments:
                 index_node_ids = [segment.index_node_id for segment in segments]
 
@@ -91,8 +95,10 @@ def duplicate_document_indexing_task(dataset_id: str, document_ids: list):
         indexing_runner = IndexingRunner()
         indexing_runner.run(documents)
         end_at = time.perf_counter()
-        logging.info(click.style("Processed dataset: {} latency: {}".format(dataset_id, end_at - start_at), fg="green"))
+        logging.info(click.style(f"Processed dataset: {dataset_id} latency: {end_at - start_at}", fg="green"))
     except DocumentIsPausedError as ex:
         logging.info(click.style(str(ex), fg="yellow"))
     except Exception:
-        pass
+        logging.exception("duplicate_document_indexing_task failed, dataset_id: %s", dataset_id)
+    finally:
+        db.session.close()
